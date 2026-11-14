@@ -7,9 +7,11 @@ ACTIONS: dict[str, str] = {
     "event.update": "修改事件口径",
     "mining.create": "发起序列挖掘",
     "mining.complete": "挖掘完成",
+    "identity.rebuild": "重建身份片段",
     "recommendation.review": "复核推荐",
     "export.recommendations": "导出推荐名单",
     "export.patterns": "导出模式库",
+    "export.fragments": "导出身份片段",
     "export.runs": "导出挖掘记录",
     "http.mutation": "写请求",
 }

@@ -1,4 +1,8 @@
-"""一条会话的行为序列：events 为事件 code 的有序数组。"""
+"""一条会话的行为序列：events 为事件 code 的有序数组。
+
+`identity_trace` 与 `events` 逐位对齐，记录每个事件发生时生效的登录账号（None=匿名）；
+它由埋点侧采集，是身份切分的唯一依据，缺失时按会话记录账号兜底。
+"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -18,6 +22,8 @@ class EventSeq(Base):
     user_id: Mapped[str] = mapped_column(String(24), index=True)
     events: Mapped[list] = mapped_column(JSON, default=list)
     event_count: Mapped[int] = mapped_column(Integer, default=0)
+    identity_trace: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    build_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     modules_path: Mapped[str | None] = mapped_column(String(160), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     converted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

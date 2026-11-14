@@ -26,18 +26,50 @@ CREATE TABLE event_defs (
 );
 
 -- 600 条会话：events 为事件码有序数组（JSON）
+-- identity_trace 与 events 逐位对齐：每个事件发生时生效的登录账号，NULL=匿名
 CREATE TABLE event_seqs (
     id              INT AUTO_INCREMENT PRIMARY KEY,
     session_id      VARCHAR(40)  NOT NULL UNIQUE,
     user_id         VARCHAR(24)  NOT NULL,
     events          JSON,
     event_count     INT          NOT NULL DEFAULT 0,
+    identity_trace  JSON,
+    build_key       VARCHAR(120),
     modules_path    VARCHAR(160),
     started_at      DATETIME     NOT NULL,
     converted       TINYINT(1)   NOT NULL DEFAULT 0,
     created_at      DATETIME     NOT NULL,
     INDEX ix_event_seqs_user (user_id),
-    INDEX ix_event_seqs_started (started_at)
+    INDEX ix_event_seqs_started (started_at),
+    INDEX ix_event_seqs_build (build_key)
+);
+
+-- 身份片段：共享设备会话按身份切换拆出的连续片段
+-- attributable 片段带 actor 可进入挖掘/推荐；pending 片段只留档、不参与
+CREATE TABLE session_fragments (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    seq_id          INT          NOT NULL,
+    session_id      VARCHAR(40)  NOT NULL,
+    fragment_no     INT          NOT NULL DEFAULT 0,
+    start_index     INT          NOT NULL DEFAULT 0,
+    end_index       INT          NOT NULL DEFAULT 0,
+    events          JSON,
+    event_count     INT          NOT NULL DEFAULT 0,
+    build_key       VARCHAR(160) NOT NULL,
+    actor           VARCHAR(24),
+    session_owner   VARCHAR(24)  NOT NULL,
+    status          VARCHAR(16)  NOT NULL DEFAULT 'pending',
+    resolution      VARCHAR(32)  NOT NULL,
+    reason          VARCHAR(255),
+    candidates      JSON,
+    started_at      DATETIME     NOT NULL,
+    created_at      DATETIME     NOT NULL,
+    updated_at      DATETIME     NOT NULL,
+    CONSTRAINT uq_fragments_build_key UNIQUE (build_key),
+    CONSTRAINT fk_fragments_seq FOREIGN KEY (seq_id) REFERENCES event_seqs(id) ON DELETE CASCADE,
+    INDEX ix_fragments_session (session_id),
+    INDEX ix_fragments_status (status),
+    INDEX ix_fragments_actor (actor)
 );
 
 -- 一次 PrefixSpan 挖掘
@@ -64,6 +96,8 @@ CREATE TABLE mine_runs (
 );
 
 -- 频繁序列模式（支持度 / 置信度 / 提升度由后端算出）
+-- 口径说明：support_count 的基数 = 按身份合并后的可归属序列数（run.metrics.fragments_attributable）
+--          同一会话同一身份的多段可归属片段会拼接成一条序列；待处理片段不参与
 CREATE TABLE patterns (
     id              INT AUTO_INCREMENT PRIMARY KEY,
     run_id          INT          NOT NULL,
@@ -81,6 +115,7 @@ CREATE TABLE patterns (
 );
 
 -- 下一步推荐（每用户最多 6 条、同模块最多 2 条，由推荐算法保证）
+-- user_id = 可归属身份；只由 attributable 片段的最近后缀产生，待处理片段不产生推荐
 CREATE TABLE recommendations (
     id              INT AUTO_INCREMENT PRIMARY KEY,
     run_id          INT          NOT NULL,

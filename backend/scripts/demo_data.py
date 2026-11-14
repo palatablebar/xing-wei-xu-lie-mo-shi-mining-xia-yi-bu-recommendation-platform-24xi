@@ -1,6 +1,9 @@
 """真实业务种子数据生成器（确定性，无网络、无随机漂移）。
 
 600 条会话 / 100 位活跃用户 / 12 个埋点事件 / 均值 8 事件 / 90 条转化会话。
+其中末尾 26 条是「共享设备」会话：先匿名浏览、登录后落到不同账号，带 `identity_trace`
+（与事件逐位对齐，记录每个事件发生时生效的账号，None=匿名），用于验证身份切分。
+
 同一入参两次运行逐字节一致：随机数只来自固定 seed + 会话序号。
 """
 from __future__ import annotations
@@ -13,6 +16,10 @@ SESSION_TOTAL = 600
 USER_TOTAL = 100
 CONVERTED_TOTAL = 90
 AVG_LEN_TARGET = 8
+SHARED_TOTAL = 26
+
+# 匿名浏览事件池（未登录也可发生）
+ANONYMOUS_POOL = ["board.view", "board.filter", "report.build", "integ.connect"]
 
 # code, module, label, is_key, 采样权重
 EVENT_CATALOG = [
@@ -105,6 +112,52 @@ def _session_events(rng: random.Random, pool: list[str], lo: int, hi: int) -> li
     return [code for index, code in enumerate(events) if index == 0 or code != events[index - 1]]
 
 
+def _shared_session(index: int) -> dict:
+    """共享设备会话：匿名浏览 → 账号甲登录 → 切换账号乙（部分会话还留一段匿名尾巴）。
+
+    三档场景（按 index 轮转）：
+    - `single`：匿名 + 单一账号 → 匿名片段可归属（唯一候选账号）；
+    - `conflict`：匿名 + 多个账号 → 匿名片段判为关联冲突（待处理）；
+    - `unknown`：全程匿名 → 判为身份未知（待处理）。
+    所有片段的事件拼起来必须与 `events` 完全一致，保证逐位可回溯。
+    """
+    scene = ("single", "conflict", "unknown")[index % 3]
+    first = f"u{(index * 7) % USER_TOTAL + 1:03d}"
+    second = f"u{(index * 11 + 5) % USER_TOTAL + 1:03d}"
+    if second == first:
+        second = f"u{(index * 11 + 6) % USER_TOTAL + 1:03d}"
+    anonymous_prefix = [ANONYMOUS_POOL[index % len(ANONYMOUS_POOL)], "board.view"]
+    if scene == "unknown":
+        events = anonymous_prefix + ["report.build", "board.filter", "alert.create"]
+        trace = [None] * len(events)
+        owner = first
+    elif scene == "conflict":
+        middle = ["acct.login", "report.build", "acct.login", "board.view", "report.export"]
+        trailer = ["board.filter", "alert.create"]
+        events = anonymous_prefix + middle + trailer
+        trace = (
+            [None] * len(anonymous_prefix)
+            + [first, first, second, second, second]
+            + [None] * len(trailer)
+        )
+        owner = second
+    else:  # single：只出现一个账号
+        middle = ["acct.login", "board.view", "report.build", "report.export", "acct.login"]
+        trailer = ["board.filter", "board.save"]
+        events = anonymous_prefix + middle + trailer
+        trace = [None] * len(anonymous_prefix) + [first] * len(middle) + [None] * len(trailer)
+        owner = first
+    return {
+        "session_id": f"s{SESSION_TOTAL + index + 1:04d}",
+        "user_id": owner,
+        "events": events,
+        "identity_trace": trace,
+        "started_at": datetime(2026, 10, 1, 8, 0, 0) + timedelta(hours=(SESSION_TOTAL + index) * 7),
+        "archetype": f"共享设备·{scene}",
+        "shared_scene": scene,
+    }
+
+
 def build_sessions(total: int = SESSION_TOTAL, seed: int = SEED) -> list[dict]:
     names = [item[0] for item in ARCHETYPES]
     weights = [item[2] for item in ARCHETYPES]
@@ -121,10 +174,13 @@ def build_sessions(total: int = SESSION_TOTAL, seed: int = SEED) -> list[dict]:
                 "session_id": f"s{index + 1:04d}",
                 "user_id": f"u{(index % USER_TOTAL) + 1:03d}",
                 "events": events,
+                "identity_trace": [f"u{(index % USER_TOTAL) + 1:03d}"] * len(events),
                 "started_at": started,
                 "archetype": name,
             }
         )
+    for index in range(SHARED_TOTAL):
+        sessions.append(_shared_session(index))
     return sessions
 
 
@@ -146,16 +202,6 @@ def mark_converted(sessions: list[dict], quota: int = CONVERTED_TOTAL) -> None:
         session["converted"] = session["session_id"] in chosen
 
 
-def latest_suffixes(sessions: list[dict], k: int = 3) -> dict[str, list[str]]:
-    """每位用户最近一条会话的最后 k 个事件（对话顺序按 started_at）。"""
-    latest: dict[str, dict] = {}
-    for session in sessions:
-        current = latest.get(session["user_id"])
-        if current is None or session["started_at"] >= current["started_at"]:
-            latest[session["user_id"]] = session
-    return {user: list(item["events"])[-k:] for user, item in latest.items()}
-
-
 def dataset() -> dict:
     sessions = build_sessions()
     mark_converted(sessions)
@@ -165,6 +211,6 @@ def dataset() -> dict:
             for code, module, label, is_key, weight in EVENT_CATALOG
         ],
         "sessions": sessions,
-        "suffixes": latest_suffixes(sessions),
         "active_users": USER_TOTAL,
+        "shared_total": SHARED_TOTAL,
     }

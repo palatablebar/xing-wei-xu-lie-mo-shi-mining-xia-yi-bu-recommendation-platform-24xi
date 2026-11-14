@@ -326,6 +326,34 @@ pre.code {
 .empty .mark { font-family: var(--font-display); font-size: 1.25rem; color: var(--ink-faint); }
 .error-box { border: 1px solid var(--danger); background: var(--danger-wash); color: var(--danger); padding: 9px 13px; font-family: var(--font-mono); font-size: var(--fs-sm); display: flex; justify-content: space-between; gap: 12px; }
 
+/* ---------- 身份片段 / 待处理区 / 重建差异 ---------- */
+.frag-track { display: flex; flex-wrap: wrap; gap: 5px; align-items: stretch; }
+.frag {
+  display: inline-flex; flex-direction: column; gap: 1px; min-width: 0;
+  border: 1px solid var(--grid); border-left-width: 3px; background: var(--void);
+  padding: 3px 7px; font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ink-soft);
+}
+.frag b { font-weight: 500; color: var(--ink); }
+.frag i { font-style: normal; color: var(--ink-faint); font-size: 0.62rem; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frag.ok { border-left-color: var(--ok); }
+.frag.pending { border-left-color: var(--warn); border-style: dashed; }
+.frag.pending b { color: var(--warn); }
+
+.hold-list { display: grid; gap: 8px; }
+.hold-item { border: 1px dashed var(--warn); background: var(--warn-wash); padding: 8px 10px; display: grid; gap: 4px; font-size: var(--fs-sm); }
+.hold-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.hold-reason { color: var(--ink); }
+.hold-events { overflow-wrap: anywhere; }
+
+.diff-table { display: grid; gap: 5px; font-family: var(--font-mono); font-size: var(--fs-xs); }
+.diff-row { display: grid; grid-template-columns: 1fr auto 58px; gap: 10px; align-items: center; }
+.diff-row > span:first-child { color: var(--ink-faint); }
+.diff-row .badge { justify-self: end; min-width: 48px; justify-content: center; }
+
+.notice { border: 1px solid var(--accent-soft); background: var(--accent-wash); padding: 8px 11px; font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--ink); display: flex; gap: 9px; align-items: baseline; }
+.notice.warn { border-color: var(--warn); background: var(--warn-wash); }
+.notice.danger { border-color: var(--danger); background: var(--danger-wash); color: var(--danger); }
+
 /* ---------- toast ---------- */
 .toast-stack { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 7px; z-index: 60; }
 .toast {

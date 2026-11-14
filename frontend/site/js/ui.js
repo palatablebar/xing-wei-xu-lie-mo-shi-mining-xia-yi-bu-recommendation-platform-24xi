@@ -197,6 +197,72 @@ export function field({ label, name, type = 'text', value = '', placeholder = ''
   return `<div class="field"><label for="${esc(name)}">${esc(label)}</label>${control}</div>`;
 }
 
+/** 身份片段轨道：可归属片段与待处理片段分段着色，hover 显示归属与原因。 */
+export function fragmentTrack(fragments) {
+  if (!fragments || fragments.length === 0) return '<span class="muted mono">（未切分）</span>';
+  const chips = fragments
+    .map((fragment) => {
+      const tone = fragment.status === 'pending' ? 'pending' : 'ok';
+      const who = fragment.actor
+        ? fragment.actor
+        : fragment.candidates && fragment.candidates.length
+          ? `候选 ${fragment.candidates.join('/')}`
+          : '匿名';
+      const title = `${fragment.session_id}#${fragment.fragment_no} · ${fragment.resolution_label}${fragment.reason ? ` · ${fragment.reason}` : ''}`;
+      const events = (fragment.events || []).join(' › ');
+      return `<span class="frag ${tone}" title="${esc(title)}"><b>${esc(who)}</b><i>${esc(events)}</i></span>`;
+    })
+    .join('<span class="arrow">|</span>');
+  return `<div class="frag-track">${chips}</div>`;
+}
+
+/** 重建前后差异：before → after，正负变化用色区分。 */
+export function diffTable(diff, labels = {}) {
+  if (!diff) return emptyState({ title: '还没有重建差异', hint: '发起一次挖掘或身份重建后生成。' });
+  const rows = [
+    ['fragments_total', '片段总数'],
+    ['attributable_fragments', '可归属片段'],
+    ['pending_fragments', '待处理片段'],
+    ['pending_events', '待处理事件'],
+    ['identities_total', '可归属身份'],
+    ['rec_count', '推荐条数'],
+  ]
+    .filter(([key]) => diff.before && key in diff.before)
+    .map(([key, label]) => {
+      const before = Number(diff.before?.[key] ?? 0);
+      const after = Number(diff.after?.[key] ?? 0);
+      const delta = Number(diff.delta?.[key] ?? after - before);
+      const tone = delta > 0 ? 'ok' : delta < 0 ? 'danger' : 'muted';
+      return `<div class="diff-row">
+        <span>${esc(label)}</span>
+        <span class="mono">${esc(before)} → ${esc(after)}</span>
+        <span class="badge ${tone}">${delta > 0 ? '+' : ''}${esc(delta)}</span>
+      </div>`;
+    });
+  return `<div class="diff-table">${rows.join('')}</div>`;
+}
+
+/** 待处理片段列表：片段号 / 会话 / 原因 / 候选账号，绝不出现推荐动作。 */
+export function pendingList(items, { showSession = true } = {}) {
+  if (!items || items.length === 0) {
+    return emptyState({ title: '待处理区为空', hint: '没有无法归属的匿名片段。' });
+  }
+  return `<div class="hold-list">${items
+    .map(
+      (item) => `<div class="hold-item">
+        <div class="hold-head">
+          <span class="badge pending">待处理</span>
+          ${showSession ? `<span class="mono">${esc(item.session_id)} #${esc(item.fragment_no)}</span>` : ''}
+          <span class="mono muted">下标 ${esc(item.start_index)}–${esc(item.end_index)}</span>
+        </div>
+        <div class="hold-reason">${esc(item.reason || '无法唯一归属')}</div>
+        <div class="mono muted">候选：${esc((item.candidates || []).join(' / ') || '无')} · 事件 ${esc(item.event_count)} 个</div>
+        ${item.events ? `<div class="mono muted hold-events">${esc((item.events || []).join(' › '))}</div>` : ''}
+      </div>`,
+    )
+    .join('')}</div>`;
+}
+
 export function toast(message, tone = '') {
   const stack = document.getElementById('toast-stack');
   const node = document.createElement('div');

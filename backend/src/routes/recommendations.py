@@ -39,6 +39,15 @@ def list_recommendations(
     )
 
 
+@router.get("/context")
+def context(
+    run_id: int | None = None,
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_roles(*READ_ROLES)),
+) -> dict:
+    return recommendation_controller.context(db, run_id, principal)
+
+
 @router.get("/{rec_id}")
 def get_recommendation(
     rec_id: int, db: Session = Depends(get_db), principal: dict = Depends(require_roles(*READ_ROLES))

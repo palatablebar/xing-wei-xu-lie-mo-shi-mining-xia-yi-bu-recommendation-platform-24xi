@@ -35,39 +35,59 @@ docker compose exec -T backend python -m pytest tests -q
 事件码重复 409。视图层再加一层按钮收敛，`site/js/config.js` 的 `PERMISSIONS` 与后端
 `src/constants/roles.py` 一一对应。
 
-## 3. 领域实体（5 张表）
+## 3. 领域实体（6 张表）
 
 | 实体 | 表 | 关键字段 |
 | --- | --- | --- |
 | `EventDef` 事件口径 | `event_defs` | `code`、`module`、`label`、`is_key`、`weight`、`sample_count` |
-| `EventSeq` 会话序列 | `event_seqs` | `session_id`、`user_id`、`events`(JSON)、`event_count`、`started_at`、`converted` |
+| `EventSeq` 会话序列 | `event_seqs` | `session_id`、`user_id`(记录账号)、`events`(JSON)、`identity_trace`(JSON)、`event_count`、`started_at`、`converted` |
+| `SessionFragment` 身份片段 | `session_fragments` | `seq_id`、`session_id`、`fragment_no`、`start_index`/`end_index`、`events`、`actor`、`status`、`resolution`、`reason`、`candidates` |
 | `MineRun` 挖掘运行 | `mine_runs` | `run_no`、`min_support_pct`、`max_len`、`top_k`、`status`、`metrics`、`coverage_pct` |
 | `Pattern` 频繁序列 | `patterns` | `items`(JSON)、`length`、`support_count`、`support_pct`、`confidence`、`lift`、`rank` |
-| `Recommendation` 下一步推荐 | `recommendations` | `user_id`、`suffix`(JSON)、`next_event`、`confidence`、`lift`、`score`、`priority`、`status` |
+| `Recommendation` 下一步推荐 | `recommendations` | `user_id`(归属身份)、`suffix`(JSON)、`next_event`、`confidence`、`lift`、`score`、`priority`、`status` |
 
 每个实体贯穿「表 → model → schema → service → controller → route → 前端 api → 页面」，
 DDL 参考见 `backend/migrations/001_core_tables.sql`。
 
+### 3.1 身份切分（共享设备匿名会话）
+
+共享设备上的匿名会话会在登录后落到不同账号。旧实现把整条会话记给最后登录者，导致
+模式、推荐名单与覆盖人数互相矛盾。现在按 `identity_trace`（与事件逐位对齐的身份标记）切分：
+
+- **片段**：同一身份的连续事件组成一段，`start_index`/`end_index` 指向源会话，逐位连续覆盖、
+  互不重叠，源会话原样保留、一条记录不丢；
+- **可归属**（`attributable`）：片段内有登录信号，或匿名片段在整条会话里只有唯一候选账号
+  → 带 `actor`，可进入模式挖掘与推荐；
+- **待处理**（`pending`）：匿名片段在会话内出现多个候选账号（`identity_conflict`）或没有
+  任何登录信号（`identity_unknown`）→ `actor` 为空，只留档与展示，**绝不参与挖掘/推荐**；
+- **合并**：同一会话内同一身份的可归属片段按片段序号拼接成一条序列；待处理片段被排除且不补位；
+- **推荐后缀**：每个身份取最近一条会话（按 `started_at`）的可归属片段尾部 3 个事件；
+- **重建失败**：整段挖掘写入回滚（会话、片段、旧版推荐都不删除），恢复旧版推荐名单，
+  运行状态记 `failed`，`metrics.restored` 记录恢复条数，总览/推荐台/审计回退到「正在供数的运行」。
+
+`backend/src/services/identity.py` 是纯函数（拆片 / 合并 / 后缀 / 待处理汇总），
+`fragment_service.py` 负责落库与幂等复用；`mining_service.py` 记录重建前后差异（`metrics.diff`）。
+
 ## 4. 算法口径（后端 Python 真算，前端只展示）
 
-纯函数在 `backend/src/services/prefixspan.py` 与 `backend/src/services/recommender.py`，不碰 DB，可直接单测。
+纯函数在 `backend/src/services/prefixspan.py`、`recommender.py` 与 `identity.py`，不碰 DB，可直接单测。
 
 ### 4.1 算法 A｜PrefixSpan 频繁序列挖掘
 
-- 最小支持度 `min_support_pct=3%`：按会话数向上取整 → 600 条会话 ⇒ **18 条会话**；
+- 最小支持度 `min_support_pct=3%`：按「按身份合并后的可归属序列数」向上取整 → 626 条会话 ⇒ 约 627 条可归属序列 ⇒ **19 条序列**；
 - 最大长度 `max_len=5`；只收长度 ≥ 2 的序列（单个事件不构成行为路径）；
-- 支持度 = 命中会话数 / 参与挖掘的会话数；模式库按支持度倒序保留 `top_k=50` 条；
-- 置信度 = 命中会话数 / 去掉末位事件后的前缀命中会话数（P(下一步 | 前缀)）；
-- 提升度 = 置信度 / 末位事件在全部会话中的占比。
+- 支持度 = 命中序列数 / 参与挖掘的可归属序列数；模式库按支持度倒序保留 `top_k=50` 条；
+- 置信度 = 命中序列数 / 去掉末位事件后的前缀命中序列数（P(下一步 | 前缀)）；
+- 提升度 = 置信度 / 末位事件在全部可归属序列中的占比。
 
 ### 4.2 算法 B｜下一步推荐
 
-- 每位活跃用户取最近一条会话的最后 `k=3` 个事件作为后缀（不足 3 个按实际长度）；
+- 每位可归属身份取最近一条会话的最后 `k=3` 个事件作为后缀（不足 3 个按实际长度；待处理片段不参与）；
 - 候选模式：模式前缀尾部与后缀逐位相等（优先 3 位，其次 2 位、1 位），推荐事件 = 模式末位事件；
 - 同一模式只出一条；分数 = **置信度 × 提升度**，按分数倒序；
-- 同模块最多 2 条、每用户最多 6 条（`MAX_PER_MODULE` / `MAX_PER_USER`）；
+- 同模块最多 2 条、每身份最多 6 条（`MAX_PER_MODULE` / `MAX_PER_USER`）；
 - 优先级：分数 ≥1.2 高、≥0.7 中、其余低；
-- 覆盖率 = 有推荐产出的用户数 / 活跃用户数。
+- 覆盖率 = 有推荐产出的可归属身份数 / 可归属身份数。
 
 > 结果全部落库（`patterns` / `recommendations`），前端只做展示与筛选，不参与任何计算。
 
@@ -79,26 +99,32 @@ DDL 参考见 `backend/migrations/001_core_tables.sql`。
 | GET | `/api/auth/me` | 当前用户 | 登录 |
 | GET | `/api/overview` | 会话数/覆盖率/模式数/信号瀑布 | 三角色 |
 | GET/POST/PATCH | `/api/events`、`/api/events/{id}` | 事件字典 | 读三角色，写仅 admin |
-| GET | `/api/sequences`、`/api/sequences/{id}`、`/api/sequences/stats` | 会话序列浏览 | 三角色（viewer 脱敏） |
+| GET | `/api/sequences`、`/api/sequences/{id}`、`/api/sequences/stats` | 会话序列浏览（详情含身份片段） | 三角色（viewer 脱敏） |
+| GET | `/api/fragments`、`/api/fragments/pending`、`/api/fragments/coverage` | 身份片段 / 待处理区 / 覆盖口径 | 三角色（viewer 脱敏） |
+| POST | `/api/fragments/rebuild` | 只重建身份片段（不重挖，失败不动推荐） | admin+analyst |
 | GET/POST | `/api/mine-runs`、`/api/mine-runs/{id}` | 挖掘运行 | 读三角色，发起 admin+analyst |
 | GET | `/api/patterns`、`/api/patterns/distribution` | 模式库 | 三角色 |
 | GET | `/api/recommendations`、`/api/recommendations/{id}` | 推荐名单 | 三角色（viewer 脱敏） |
+| GET | `/api/recommendations/context` | 待处理片段 + 排除原因 + 重建前后差异 | 三角色（viewer 脱敏） |
 | PATCH | `/api/recommendations/{id}/review` | 复核采纳/驳回 | admin+analyst（viewer 403） |
-| GET | `/api/exports/recommendations.csv`、`patterns.csv`、`mine-runs.csv` | CSV 导出 | admin+analyst（viewer 403） |
+| GET | `/api/exports/recommendations.csv`、`patterns.csv`、`mine-runs.csv`、`fragments.csv` | CSV 导出（含待处理片段与排除原因） | admin+analyst（viewer 403） |
 | GET | `/api/audit` | 审计日志 | 仅 admin |
 | GET | `/api/health` | 健康检查（db/redis/worker 心跳） | 公开 |
 
 ## 6. 页面（原生 ES Modules）
 
 1. `#/login` 登录（信号 scope + 操作员终端版式）
-2. `#/overview` 总览：四条仪器读数 + **信号瀑布**（12 个时间桶 × 6 模块堆叠）+ 模块事件量 + 模式支持度阶梯
+2. `#/overview` 总览：四条仪器读数 + **信号瀑布**（12 个时间桶 × 6 模块堆叠）+ 模块事件量 +
+   身份切分读数与待处理片段前 5 条 + 重建前后差异 + 模式支持度阶梯；重建失败时显示「已回滚、沿用旧版」
 3. `#/events` 事件字典（列表 + 抽屉详情 + admin 改口径/登记）
-4. `#/sequences` 序列浏览（筛选 + 事件轨道 chip + 抽屉全文）
-5. `#/mining` 模式挖掘（运行列表 + 发起挖掘 + 参数口径 + 模式库阶梯/表格 + 导出）
-6. `#/recommendations` 推荐名单（筛选 + 抽屉复核 + 导出 CSV）
-7. `#/audit` 审计日志（仅 admin 可见可访问）
+4. `#/sequences` 序列浏览（筛选 + 事件轨道 chip + 抽屉全文 + 身份片段逐段追溯）
+5. `#/mining` 模式挖掘（运行列表 + 发起挖掘 + 重建身份 + 参数口径 + 模式库阶梯/表格 + 导出 +
+   待处理片段与重建差异）
+6. `#/recommendations` 推荐名单（筛选 + 抽屉复核 + 导出 CSV + **待处理片段/排除原因面板** +
+   重建前后差异面板 + 失败回滚提示 + 导出待处理片段）
+7. `#/audit` 审计日志（仅 admin 可见可访问；身份重建与挖掘详情展示待处理片段、排除原因、重建前后差异）
 
-共用组件：`site/js/ui.js` 的 `table` / `drawer` / `field` / `readouts` / `waterfall` / `track` / `ladder` / `badge`。
+共用组件：`site/js/ui.js` 的 `table` / `drawer` / `field` / `readouts` / `waterfall` / `track` / `ladder` / `badge` / `fragmentTrack` / `diffTable` / `pendingList`。
 
 ## 7. 共享枚举出现位置（改动需两侧同步）
 
@@ -108,24 +134,31 @@ DDL 参考见 `backend/migrations/001_core_tables.sql`。
 | 挖掘状态 `queued/running/success/partial/failed` | `enums.py::MineStatus`、`MINE_STATUS_LABELS` | `ENUMS.mineStatus`、`config.js::statusTone` |
 | 触发方式 `manual/schedule/seed` | `enums.py::TriggerKind`、`TRIGGER_LABELS` | `ENUMS.trigger` |
 | 复核状态 `pending/confirmed/dismissed` | `enums.py::ReviewStatus`、`REVIEW_STATUS_LABELS` | `ENUMS.reviewStatus`、`reviewTone` |
+| 片段状态 `attributable/pending` | `enums.py::FragmentStatus`、`FRAGMENT_STATUS_LABELS` | `ENUMS.fragmentStatus`、`fragmentTone` |
+| 归属判定 `login/session_owner/anonymous_single_candidate/identity_conflict/identity_unknown/source_changed` | `enums.py::AttributionResolution`、`RESOLUTION_LABELS` | `ENUMS.resolution` |
 | 优先级 `high/medium/low` | `enums.py::RecPriority`、`REC_PRIORITY_LABELS` | `ENUMS.priority`、`badgeTone` |
 | 角色 `admin/analyst/viewer` | `enums.py::Role`、`constants/roles.py` | `config.js::ROLE_LABELS/PERMISSIONS` |
 
 ## 8. seed（幂等）
 
 `backend/scripts/demo_data.py` 用固定 seed + 会话序号生成确定性数据（无网络、无随机漂移）：
-**12 个事件、600 条会话（均值约 8 事件）、90 条转化会话、1 次初始化挖掘**。
+**12 个事件、626 条会话（600 条常规 + 26 条共享设备；均值约 8 事件）、90 条转化会话、1 次初始化挖掘**。
+共享设备会话带 `identity_trace`：匿名浏览 → 登录到不同账号，覆盖三档场景（单一候选账号 /
+多候选冲突 / 全程匿名），保证待处理区有真实样本、且片段事件与源会话逐位一致。
+
 `backend/scripts/seed_demo.py` 按自然键 upsert：`users.email`、`event_defs.code`、`event_seqs.session_id`、
-`mine_runs.seed_key`、`patterns(run_id, seq_key)`、`recommendations(run_id, user_id, pattern_id, next_event)`、
-`audit_logs.seed_key`；重复执行不新增记录、不覆盖人工复核过的推荐状态。
+`session_fragments(build_key)`、`mine_runs.seed_key`、`patterns(run_id, seq_key)`、
+`recommendations(run_id, user_id, pattern_id, next_event)`、`audit_logs.seed_key`；重复执行不新增记录、
+不覆盖人工复核过的推荐状态、不重复膨胀片段。
 
 结束时打印一行（两次执行逐字一致）：
 
 ```
-SEED_SUMMARY brand=nextbest users=3 sources=<事件口径数> runs=<挖掘运行数> findings=<模式数> pending=<待复核推荐数>
+SEED_SUMMARY brand=nextbest users=3 sources=<事件口径数> runs=<挖掘运行数> findings=<模式数> pending=<待复核推荐数> fragments=<片段数> hold=<待处理片段数>
 ```
 
-`sources` 对应事件字典数量，`runs` 对应挖掘运行数，`findings` 对应模式库条数，`pending` 对应待复核推荐数。
+`sources` 对应事件字典数量，`runs` 对应挖掘运行数，`findings` 对应模式库条数，`pending` 对应待复核推荐数，
+`fragments` 对应身份片段总数，`hold` 对应待处理片段数。
 
 ## 9. 测试
 
@@ -137,6 +170,8 @@ BASE_URL=http://localhost:18209 node ../test-artifacts/gb-610/tests/screenshots.
 
 - `backend/tests/test_prefixspan.py`：频次门槛、边界（等于最小计数入选 / 少一条落选）、长度上限、top_k 截断、置信度与提升度算术、单事件不计、空输入、确定性；
 - `backend/tests/test_recommender.py`：后缀匹配、不推荐刚做过的动作、无匹配返回空、按分数排序、同模块 ≤2、每用户 ≤6、覆盖率、优先级分档；
+- `backend/tests/test_identity.py`：按身份切分、逐位覆盖不重叠、缺 trace 兜底、唯一候选匿名归因、多候选/无候选进待处理、待处理不进入序列与后缀、同身份跨片段合并、最近会话后缀、排除原因汇总、确定性；
+- `backend/tests/test_mining_identity.py`：共享设备不再整条记给最后登录者、待处理片段不产生推荐、重建前后差异与排除原因、二次挖掘片段幂等、重建失败恢复旧版推荐且会话/片段不丢、失败运行不顶替旧版；
 - `backend/tests/test_security.py`：密码哈希、JWT 往返、非法 token。
 - 真机结果（含 seed 两次原文、pytest、smoke、403、关键数值、截图清单）记录在
   `batch-20261113/test-artifacts/gb-610/TESTING.md`。
@@ -158,5 +193,9 @@ BASE_URL=http://localhost:18209 node ../test-artifacts/gb-610/tests/screenshots.
 ## 12. 已知边界
 
 - 合成埋点数据（无真实客户埋点），会话时长与转化规则是演示口径；
+- 身份切分依赖埋点侧采集的 `identity_trace`；老会话缺少轨迹时按「整条属于记录账号」兜底，
+  不会误拆，但也无法识别其中的共享设备切换；
+- 匿名片段只有在整条会话仅一个候选账号时才可归属；多候选一律留在待处理区，等待人工确认，
+  系统不猜测、不给冲突账号推荐；
 - 模式库按支持度倒序截断 top_k（默认 50），更长的稀有路径不会进入推荐候选；
 - 定时重挖用 Celery beat 触发，只跑一次全量，未做增量窗口与断点续算。

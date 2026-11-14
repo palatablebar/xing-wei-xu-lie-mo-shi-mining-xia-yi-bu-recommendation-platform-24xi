@@ -44,6 +44,26 @@ def patterns_csv(db: Session, run_id: int | None, principal: dict, request: Requ
     return Response(content=content, media_type="text/csv; charset=utf-8", headers=csv_response_headers("patterns.csv"))
 
 
+def fragments_csv(db: Session, status: str | None, principal: dict, request: Request) -> Response:
+    content = export_service.fragments_csv(db, status=status)
+    audit_service.record(
+        db,
+        actor_email=principal["email"],
+        actor_role=principal["role"],
+        action="export.fragments",
+        entity="session_fragment",
+        entity_id=status,
+        detail={"bytes": len(content), "status": status},
+        ip=request.client.host if request.client else None,
+    )
+    db.commit()
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers=csv_response_headers("identity-fragments.csv"),
+    )
+
+
 def runs_csv(db: Session, principal: dict, request: Request) -> Response:
     content = export_service.runs_csv(db)
     audit_service.record(

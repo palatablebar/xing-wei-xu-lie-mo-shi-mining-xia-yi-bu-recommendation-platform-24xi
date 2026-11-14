@@ -23,7 +23,13 @@ def create_run(db: Session, payload: dict, principal: dict, request: Request) ->
         action="mining.create",
         entity="mine_run",
         entity_id=run.id,
-        detail={"run_no": run.run_no, "status": run.status, "patterns": run.pattern_count},
+        detail={
+            "run_no": run.run_no,
+            "status": run.status,
+            "patterns": run.pattern_count,
+            "pending_fragments": ((run.metrics or {}).get("pending") or {}).get("pending_fragments", 0),
+            "restored": (run.metrics or {}).get("restored"),
+        },
         ip=request.client.host if request.client else None,
     )
     audit_service.record(
@@ -33,7 +39,14 @@ def create_run(db: Session, payload: dict, principal: dict, request: Request) ->
         action="mining.complete",
         entity="mine_run",
         entity_id=run.id,
-        detail={"patterns": run.pattern_count, "recommendations": run.rec_count, "coverage": run.coverage_pct},
+        detail={
+            "patterns": run.pattern_count,
+            "recommendations": run.rec_count,
+            "coverage": run.coverage_pct,
+            "pending": (run.metrics or {}).get("pending"),
+            "diff": (run.metrics or {}).get("diff"),
+            "restored": (run.metrics or {}).get("restored"),
+        },
         layer="domain",
         ip=request.client.host if request.client else None,
     )

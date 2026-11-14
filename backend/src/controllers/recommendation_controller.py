@@ -19,6 +19,10 @@ def get_recommendation(db: Session, rec_id: int, principal: dict) -> dict:
     return recommendation_service.detail(db, rec_id, masked=_masked(principal))
 
 
+def context(db: Session, run_id: int | None, principal: dict) -> dict:
+    return recommendation_service.context(db, run_id, masked=_masked(principal))
+
+
 def review(db: Session, rec_id: int, payload: dict, principal: dict, request: Request) -> dict:
     rec = recommendation_service.get_recommendation(db, rec_id)
     recommendation_service.review(db, rec, status=payload["status"], note=payload.get("note"), reviewer=principal["email"])

@@ -31,6 +31,16 @@ def patterns_csv(
     return export_controller.patterns_csv(db, run_id, principal, request)
 
 
+@router.get("/fragments.csv")
+def fragments_csv(
+    request: Request,
+    status: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    principal: dict = Depends(require_roles(*EXPORT_ROLES)),
+):
+    return export_controller.fragments_csv(db, status, principal, request)
+
+
 @router.get("/mine-runs.csv")
 def runs_csv(
     request: Request,

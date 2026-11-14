@@ -68,6 +68,47 @@ MINE_STATUS_ORDER: list[str] = [
 ]
 
 
+class FragmentStatus(StrEnum):
+    """会话片段身份归属状态：可归属的片段才能进入模式挖掘与推荐。"""
+
+    ATTRIBUTABLE = "attributable"
+    PENDING = "pending"
+
+
+FRAGMENT_STATUS_LABELS: dict[str, str] = {
+    FragmentStatus.ATTRIBUTABLE.value: "可归属",
+    FragmentStatus.PENDING.value: "待处理",
+}
+
+
+class AttributionResolution(StrEnum):
+    """片段身份的判定方式（写进片段，便于追溯为什么不给某账号推荐）。"""
+
+    LOGIN = "login"  # 片段内有明确登录信号
+    SESSION_OWNER = "session_owner"  # 无身份切换信号，整条会话归原记录账号
+    ANONYMOUS_SINGLE_CANDIDATE = "anonymous_single_candidate"  # 匿名片段，会话内仅一个登录账号
+    IDENTITY_CONFLICT = "identity_conflict"  # 匿名片段，会话内多个登录账号，无法唯一归属
+    IDENTITY_UNKNOWN = "identity_unknown"  # 匿名片段，会话内没有登录信号
+    SOURCE_CHANGED = "source_changed"  # 源会话事件缩短后遗留的旧片段，保留在待处理区
+
+
+RESOLUTION_LABELS: dict[str, str] = {
+    AttributionResolution.LOGIN.value: "登录信号",
+    AttributionResolution.SESSION_OWNER.value: "会话单账号（无切换信号）",
+    AttributionResolution.ANONYMOUS_SINGLE_CANDIDATE.value: "匿名片段 · 单一候选账号",
+    AttributionResolution.IDENTITY_CONFLICT.value: "匿名片段 · 多候选账号冲突",
+    AttributionResolution.IDENTITY_UNKNOWN.value: "匿名片段 · 无候选账号",
+    AttributionResolution.SOURCE_CHANGED.value: "源会话变更 · 旧片段",
+}
+
+
+ATTRIBUTION_REASON_LABELS: dict[str, str] = {
+    AttributionResolution.IDENTITY_CONFLICT.value: "共享设备同一会话出现多个登录账号，匿名片段无法唯一归属",
+    AttributionResolution.IDENTITY_UNKNOWN.value: "会话内没有登录信号，匿名片段无法归属到任何账号",
+    AttributionResolution.SOURCE_CHANGED.value: "源会话事件已变化，该旧片段保留备查但不再参与挖掘与推荐",
+}
+
+
 class TriggerKind(StrEnum):
     MANUAL = "manual"
     SCHEDULE = "schedule"

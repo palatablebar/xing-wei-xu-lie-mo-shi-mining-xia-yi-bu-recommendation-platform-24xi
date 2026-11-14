@@ -1,4 +1,8 @@
-"""总览：会话/覆盖率/模式数 + 信号瀑布（按模块 × 时间桶的会话事件量）。"""
+"""总览：会话/覆盖率/模式数 + 信号瀑布（按模块 × 时间桶的会话事件量）。
+
+同时给出身份口径（可归属片段 / 待处理片段 / 身份数）与最近一次重建的前后差异，
+让「模式、推荐名单、覆盖人数」三处读数对齐同一身份口径。
+"""
 from __future__ import annotations
 
 import time
@@ -14,6 +18,7 @@ from src.models.event_seq import EventSeq
 from src.models.mine_run import MineRun
 from src.models.pattern import Pattern
 from src.models.recommendation import Recommendation
+from src.services import fragment_service, mining_service
 from src.utils.timeutil import iso_utc, local_now, utcnow
 
 MODULE_TONE = {
@@ -97,10 +102,12 @@ def overview(db: Session) -> dict:
     users = db.scalar(select(func.count(func.distinct(EventSeq.user_id)))) or 0
     events_total = db.scalar(select(func.count()).select_from(EventDef)) or 0
     run = db.scalar(select(MineRun).order_by(MineRun.id.desc()).limit(1))
-    latest_patterns = db.scalar(select(func.count()).select_from(Pattern).where(Pattern.run_id == run.id)) if run else 0
+    # 读数（模式数/推荐/复核）按「正在供数的运行」统计：失败运行不顶替旧版
+    serving = mining_service.serving_run(db) or run
+    latest_patterns = db.scalar(select(func.count()).select_from(Pattern).where(Pattern.run_id == serving.id)) if serving else 0
     pending = (
-        db.scalar(select(func.count()).select_from(Recommendation).where(Recommendation.run_id == run.id, Recommendation.status == "pending"))
-        if run
+        db.scalar(select(func.count()).select_from(Recommendation).where(Recommendation.run_id == serving.id, Recommendation.status == "pending"))
+        if serving
         else 0
     )
     avg_len = db.scalar(select(func.avg(EventSeq.event_count))) or 0
@@ -109,11 +116,20 @@ def overview(db: Session) -> dict:
     status_rows = (
         db.execute(
             select(Recommendation.status, func.count())
-            .where(Recommendation.run_id == run.id)
+            .where(Recommendation.run_id == serving.id)
             .group_by(Recommendation.status)
         ).all()
-        if run
+        if serving
         else []
+    )
+    identity = fragment_service.coverage(db)
+    pending_identity = fragment_service.pending_summary(db)
+    pending_sample = fragment_service.pending_lines(db, limit=5)
+    serving = mining_service.serving_run(db)
+    recover = (
+        db.scalar(select(MineRun).where(MineRun.id == (run.metrics or {}).get("before", {}).get("previous_run_id")))
+        if run and run.status == "failed"
+        else None
     )
     return {
         "sequences_total": sessions,
@@ -125,6 +141,36 @@ def overview(db: Session) -> dict:
         "patterns_total": latest_patterns or 0,
         "pending_total": pending or 0,
         "worker_alive": worker_alive(),
+        "identity": identity,
+        "pending_identity": pending_identity,
+        "pending_samples": pending_sample,
+        "rebuild_diff": (run.metrics or {}).get("diff") if run else None,
+        "serving": (
+            {
+                "id": serving.id,
+                "run_no": serving.run_no,
+                "status": serving.status,
+                "pattern_count": serving.pattern_count,
+                "rec_count": serving.rec_count,
+                "coverage_pct": serving.coverage_pct,
+                "covered_users": serving.covered_users,
+                "active_users": serving.active_users,
+                "min_support_pct": serving.min_support_pct,
+                "max_len": serving.max_len,
+            }
+            if serving
+            else None
+        ),
+        "serving_run_id": serving.id if serving else None,
+        "recovered_run": (
+            {
+                "run_no": recover.run_no,
+                "rec_count": recover.rec_count,
+                "coverage_pct": recover.coverage_pct,
+            }
+            if recover
+            else None
+        ),
         "latest_run": {
             "id": run.id,
             "run_no": run.run_no,
@@ -139,6 +185,9 @@ def overview(db: Session) -> dict:
             "min_support_pct": run.min_support_pct,
             "max_len": run.max_len,
             "top_support_pct": (run.metrics or {}).get("top_support_pct", 0.0),
+            "built": (run.metrics or {}).get("built"),
+            "restored": (run.metrics or {}).get("restored"),
+            "pending": (run.metrics or {}).get("pending"),
         }
         if run
         else None,

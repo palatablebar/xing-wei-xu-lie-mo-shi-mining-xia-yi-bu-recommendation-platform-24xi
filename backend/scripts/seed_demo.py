@@ -62,22 +62,39 @@ def ensure_events(db, events: list[dict]) -> int:
 def ensure_sequences(db, sessions: list[dict]) -> int:
     existing = {row.session_id for row in db.scalars(select(EventSeq)).all()}
     for spec in sessions:
-        if spec["session_id"] in existing:
-            continue
         events = list(spec["events"])
-        db.add(
-            EventSeq(
-                session_id=spec["session_id"],
-                user_id=spec["user_id"],
-                events=events,
-                event_count=len(events),
-                modules_path=">".join(MODULE_OF.get(code, "board") for code in events),
-                started_at=spec["started_at"],
-                converted=bool(spec.get("converted")),
+        trace = list(spec.get("identity_trace") or [])
+        row = db.scalar(select(EventSeq).where(EventSeq.session_id == spec["session_id"]))
+        if row is None:
+            if spec["session_id"] in existing:
+                continue
+            db.add(
+                EventSeq(
+                    session_id=spec["session_id"],
+                    user_id=spec["user_id"],
+                    events=events,
+                    event_count=len(events),
+                    identity_trace=trace,
+                    modules_path=">".join(MODULE_OF.get(code, "board") for code in events),
+                    started_at=spec["started_at"],
+                    converted=bool(spec.get("converted")),
+                )
             )
-        )
+        elif not row.identity_trace:
+            # 旧快照补齐身份轨迹（不动已有事件，保证记录不丢失）
+            row.identity_trace = trace
     db.flush()
     return db.scalar(select(func.count()).select_from(EventSeq)) or 0
+
+
+def ensure_fragments(db, *, record_audit: bool = False) -> dict:
+    """按身份切换重建片段；幂等，重复执行复用既有片段行。"""
+    from src.services import fragment_service
+
+    result = fragment_service.build_fragments(db)
+    if record_audit:
+        ensure_rebuild_audit(db, result)
+    return result
 
 
 def ensure_sample_counts(db) -> None:
@@ -106,6 +123,36 @@ def ensure_mining(db) -> MineRun:
     )
 
 
+def ensure_rebuild_audit(db, result: dict) -> None:
+    """身份重建留痕（seed 层）：只在该 seed_key 不存在时写入，保证幂等。"""
+    from src.models.audit import AuditLog
+    from src.services import fragment_service
+
+    seed_key = "seed-audit-identity-rebuild"
+    if db.scalar(select(AuditLog).where(AuditLog.seed_key == seed_key)) is not None:
+        return
+    summary = fragment_service.pending_summary(db)
+    db.add(
+        AuditLog(
+            actor_email="seed@nextbest.io",
+            actor_role="admin",
+            action="identity.rebuild",
+            entity="session_fragment",
+            detail={
+                "sessions": result.get("sessions"),
+                "created": result.get("created"),
+                "updated": result.get("updated"),
+                "pending_fragments": summary["pending_fragments"],
+                "pending_events": summary["pending_events"],
+                "pending_sessions": summary["pending_sessions"],
+            },
+            layer="seed",
+            seed_key=seed_key,
+        )
+    )
+    db.flush()
+
+
 def ensure_audit(db) -> None:
     for seed_key, email, role, action, entity, detail in SEED_AUDIT:
         exists = db.scalar(select(AuditLog).where(AuditLog.seed_key == seed_key))
@@ -131,6 +178,8 @@ def seed_all() -> dict:
         events = ensure_events(db, data["events"])
         sequences = ensure_sequences(db, data["sessions"])
         ensure_sample_counts(db)
+        fragments = ensure_fragments(db)
+        ensure_rebuild_audit(db, fragments)
         run = ensure_mining(db)
         ensure_audit(db)
         db.flush()
@@ -144,19 +193,26 @@ def seed_all() -> dict:
             )
             or 0
         )
+        from src.services import fragment_service
+
+        pending_fragments = fragment_service.pending_summary(db)
         summary = (
             f"SEED_SUMMARY brand=nextbest users={users} sources={events} "
             f"runs={db.scalar(select(func.count()).select_from(MineRun)) or 0} "
-            f"findings={recs} pending={pending}"
+            f"findings={recs} pending={pending} "
+            f"fragments={fragment_service.coverage(db)['fragments_total']} "
+            f"hold={pending_fragments['pending_fragments']}"
         )
         print(summary, flush=True)
         return {
             "users": users,
             "events": events,
             "sequences": sequences,
+            "fragments": fragments,
             "patterns": patterns,
             "recommendations": recs,
             "pending": pending,
+            "pending_fragments": pending_fragments["pending_fragments"],
         }
 
 

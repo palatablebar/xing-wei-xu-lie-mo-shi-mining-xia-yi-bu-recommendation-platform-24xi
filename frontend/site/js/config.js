@@ -11,9 +11,9 @@ export const BRAND = {
   loginLead:
     '先看信号有没有形状，再决定推什么。每一次推荐都能追到一条模式、一条会话、一个支持度。',
   loginPoints: [
-    ['01', '600 条会话按事件时序入库，均值 8 个事件，转化会话单独可筛。'],
-    ['02', 'PrefixSpan 最小支持度 3%（18 条会话），最长 5 步，取支持度前 50 条入模式库。'],
-    ['03', '推荐按「置信度 × 提升度」排序，同模块最多 2 条，每用户最多 6 条。'],
+    ['01', '626 条会话按事件时序入库（含 26 条共享设备会话），均值 8 个事件，转化会话单独可筛。'],
+    ['02', '共享设备会话按身份切换拆成片段：可归属片段进入挖掘，冲突/匿名片段留在待处理区，不参与推荐。'],
+    ['03', 'PrefixSpan 最小支持度 3%，最长 5 步，取支持度前 50 条入模式库；推荐按「置信度 × 提升度」排序。'],
   ],
 };
 
@@ -75,6 +75,18 @@ export const ENUMS = {
     medium: '中',
     low: '低',
   },
+  fragmentStatus: {
+    attributable: '可归属',
+    pending: '待处理',
+  },
+  resolution: {
+    login: '登录信号',
+    session_owner: '会话单账号（无切换信号）',
+    anonymous_single_candidate: '匿名片段 · 单一候选账号',
+    identity_conflict: '匿名片段 · 多候选账号冲突',
+    identity_unknown: '匿名片段 · 无候选账号',
+    source_changed: '源会话变更 · 旧片段',
+  },
 };
 
 export function can(role, permission) {
@@ -87,6 +99,10 @@ export function badgeTone(priority) {
 
 export function reviewTone(status) {
   return { pending: 'pending', confirmed: 'ok', dismissed: 'danger' }[status] || 'info';
+}
+
+export function fragmentTone(status) {
+  return { attributable: 'ok', pending: 'pending' }[status] || 'info';
 }
 
 export function statusTone(status) {

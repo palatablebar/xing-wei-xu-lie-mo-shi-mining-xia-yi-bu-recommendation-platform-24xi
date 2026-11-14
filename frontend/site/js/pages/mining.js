@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import { ENUMS, can, statusTone } from '../config.js';
-import { drawer, emptyState, errorBox, errorMessage, esc, field, fmtPct, fmtTime, kv, ladder, table, toast, track } from '../ui.js';
+import { diffTable, drawer, emptyState, errorBox, errorMessage, esc, field, fmtPct, fmtTime, kv, ladder, table, toast, track } from '../ui.js';
 
 const state = { status: '', runId: '' };
 
@@ -8,22 +8,39 @@ function runLog(run) {
   return `<pre class="code">${esc(run.log_text || '（无日志）')}</pre>`;
 }
 
+function builtSummary(run) {
+  const built = (run.metrics || {}).built;
+  if (!built) return '';
+  return `<div class="legend" style="margin-top:8px"><span>身份重建：新建 ${esc(built.created)} 段 · 复用 ${esc(built.updated)} 段</span></div>`;
+}
+
 function openRun(view, ctx, run) {
+  const metrics = run.metrics || {};
+  const pending = metrics.pending || {};
   drawer({
     title: `挖掘 ${run.run_no}`,
     subtitle: `${ENUMS.trigger[run.trigger] || run.trigger} · ${ENUMS.mineStatus[run.status] || run.status}`,
     body: `${kv([
-      ['最小支持度', `${esc(run.min_support_pct)}%（${esc((run.metrics || {}).min_support_count || 0)} 条会话）`],
+      ['最小支持度', `${esc(run.min_support_pct)}%（${esc(metrics.min_support_count || 0)} 条序列）`],
       ['最大长度', `${esc(run.max_len)} 步`],
       ['模式库上限', `${esc(run.top_k)} 条`],
-      ['会话数', esc(run.sequence_count)],
-      ['模式数', `${esc(run.pattern_count)} 条 · top 支持度 ${fmtPct((run.metrics || {}).top_support_pct || 0)}`],
-      ['推荐数', `${esc(run.rec_count)} 条 · 覆盖 ${esc(run.covered_users)}/${esc(run.active_users)} 用户（${fmtPct(run.coverage_pct)}）`],
+      ['序列数', `${esc(run.sequence_count)} 条（按身份合并）`],
+      ['模式数', `${esc(run.pattern_count)} 条 · top 支持度 ${fmtPct(metrics.top_support_pct || 0)}`],
+      ['推荐数', `${esc(run.rec_count)} 条 · 覆盖 ${esc(run.covered_users)}/${esc(run.active_users)} 身份（${fmtPct(run.coverage_pct)}）`],
+      ['待处理片段', `${esc(pending.pending_fragments ?? 0)} 段 · ${esc(pending.pending_events ?? 0)} 事件（已排除）`],
       ['操作人', esc(run.operator_email)],
       ['开始 / 结束', `${fmtTime(run.started_at)} → ${fmtTime(run.finished_at)}`],
     ])}
+    ${builtSummary(run)}
+    <h3 style="font-size:0.95rem;margin:6px 0 2px">重建前后差异</h3>
+    ${diffTable(metrics.diff)}
+    ${
+      metrics.restored
+        ? `<div class="notice warn"><span class="badge high">已回滚</span><span>重建失败，已恢复旧版推荐名单 ${esc(metrics.restored.restored)} 条（覆盖 ${esc(metrics.restored.covered_users)}/${esc(metrics.restored.active_users)}）。</span></div>`
+        : ''
+    }
     <h3 style="font-size:0.95rem;margin:6px 0 2px">top1 模式</h3>
-    <div class="mono hl">${esc((run.metrics || {}).top_pattern || '—')}</div>
+    <div class="mono hl">${esc(metrics.top_pattern || '—')}</div>
     <h3 style="font-size:0.95rem;margin:6px 0 2px">运行日志</h3>
     ${runLog(run)}`,
     footer: `<button class="btn accent" data-goto>查看本次模式库</button>`,
@@ -32,6 +49,22 @@ function openRun(view, ctx, run) {
     document.querySelectorAll('.drawer-backdrop').forEach((node) => node.remove());
     miningPage.render(view, ctx);
   });
+}
+
+async function rebuildIdentity(view, ctx, button) {
+  button.disabled = true;
+  const label = button.textContent;
+  button.textContent = '重建中…';
+  try {
+    const run = await api.post('/api/fragments/rebuild', { min_support_pct: 3, max_len: 5, top_k: 50, trigger: 'manual' });
+    const coverage = (run.metrics || {}).coverage || {};
+    toast(`身份重建完成：可归属 ${coverage.attributable_fragments} 段 / 待处理 ${coverage.pending_fragments} 段`);
+    await miningPage.render(view, ctx);
+  } catch (err) {
+    toast(errorMessage(err), 'err');
+    button.disabled = false;
+    button.textContent = label;
+  }
 }
 
 function openRunForm(view, ctx) {
@@ -90,11 +123,15 @@ function openPattern(pattern) {
 
 export const miningPage = {
   async render(view, ctx) {
+    state.runId = ctx.query.run_id || state.runId;
     let runs;
     let patterns;
     try {
       runs = await api.get('/api/mine-runs', { status: state.status, limit: 20 });
-      if (!state.runId && runs.items.length) state.runId = String(runs.items[0].id);
+      if (!state.runId && runs.items.length) {
+        const serving = runs.items.find((item) => ['success', 'partial'].includes(item.status) && item.rec_count > 0);
+        state.runId = String((serving || runs.items[0]).id);
+      }
       patterns = await api.get('/api/patterns', { run_id: state.runId, limit: 50 });
     } catch (err) {
       view.innerHTML = errorBox(errorMessage(err));
@@ -109,6 +146,7 @@ export const miningPage = {
             <h2>挖掘运行</h2>
             <div style="display:flex;gap:8px;align-items:center">
               <span class="meta">${runs.total} 次</span>
+              ${can(ctx.user.role, 'mining:create') ? '<button class="btn sm ghost" id="rebuild-fragments">重建身份</button>' : ''}
               ${can(ctx.user.role, 'mining:create') ? '<button class="btn sm accent" id="new-run">发起挖掘</button>' : ''}
             </div>
           </div>
@@ -132,13 +170,16 @@ export const miningPage = {
               active
                 ? `<dl class="kv">
                     <dt>运行号</dt><dd class="mono">${esc(active.run_no)}</dd>
-                    <dt>最小支持度</dt><dd>${esc(active.min_support_pct)}% · ${esc((active.metrics || {}).min_support_count || 0)} 条会话</dd>
+                    <dt>最小支持度</dt><dd>${esc(active.min_support_pct)}% · ${esc((active.metrics || {}).min_support_count || 0)} 条序列</dd>
                     <dt>最大长度</dt><dd>${esc(active.max_len)} 步</dd>
                     <dt>top1 支持度</dt><dd>${fmtPct((active.metrics || {}).top_support_pct || 0)}</dd>
                     <dt>平均序列长</dt><dd>${esc((active.metrics || {}).avg_sequence_len || 0)} 事件</dd>
-                    <dt>覆盖率</dt><dd>${fmtPct(active.coverage_pct)}（${esc(active.covered_users)}/${esc(active.active_users)}）</dd>
+                    <dt>覆盖率</dt><dd>${fmtPct(active.coverage_pct)}（${esc(active.covered_users)}/${esc(active.active_users)} 身份）</dd>
+                    <dt>待处理片段</dt><dd>${esc(((active.metrics || {}).pending || {}).pending_fragments ?? 0)} 段（不参与挖掘）</dd>
                   </dl>
                   <div class="mono muted" style="margin-top:10px">${esc((active.metrics || {}).top_pattern || '')}</div>
+                  <h3 style="font-size:0.95rem;margin:12px 0 4px">重建前后差异</h3>
+                  ${diffTable((active.metrics || {}).diff)}
                   ${can(ctx.user.role, 'export:read') ? '<button class="btn sm ghost" id="export-patterns" style="margin-top:10px">导出模式库 CSV</button>' : ''}`
                 : emptyState({ title: '暂无参数', hint: '先发起一次挖掘。' })
             }
@@ -184,6 +225,9 @@ export const miningPage = {
       });
     });
     view.querySelector('#new-run')?.addEventListener('click', () => openRunForm(view, ctx));
+    view.querySelector('#rebuild-fragments')?.addEventListener('click', (event) => {
+      rebuildIdentity(view, ctx, event.currentTarget);
+    });
     view.querySelector('#run-filter')?.addEventListener('change', (event) => {
       state.runId = event.target.value;
       miningPage.render(view, ctx);

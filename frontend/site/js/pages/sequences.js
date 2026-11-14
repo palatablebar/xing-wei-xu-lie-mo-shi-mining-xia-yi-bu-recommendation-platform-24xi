@@ -1,7 +1,25 @@
 import { api } from '../api.js';
-import { drawer, errorBox, errorMessage, esc, field, fmtTime, kv, table, track } from '../ui.js';
+import { fragmentTone } from '../config.js';
+import { drawer, errorBox, errorMessage, esc, field, fmtTime, fragmentTrack, kv, table, track } from '../ui.js';
 
 const state = { q: '', converted: '', minLen: '' };
+
+function fragmentDetail(fragments) {
+  if (!fragments || !fragments.length) return '<span class="muted mono">（未切分）</span>';
+  return `<div class="stack">${fragments
+    .map(
+      (fragment) => `<div class="hold-item" style="border-style:${fragment.status === 'pending' ? 'dashed' : 'solid'};background:${fragment.status === 'pending' ? 'var(--warn-wash)' : 'var(--panel-2)'}">
+        <div class="hold-head">
+          <span class="badge ${fragmentTone(fragment.status)}">${esc(fragment.status_label)}</span>
+          <span class="mono">#${esc(fragment.fragment_no)} · 下标 ${esc(fragment.start_index)}–${esc(fragment.end_index)}</span>
+          <span class="mono muted">${esc(fragment.actor || '匿名')}</span>
+        </div>
+        <div class="mono muted">判定：${esc(fragment.resolution_label)}${fragment.reason ? ` · ${esc(fragment.reason)}` : ''}</div>
+        <div class="mono muted">事件：${esc((fragment.events || []).join(' › '))}</div>
+      </div>`,
+    )
+    .join('')}</div>`;
+}
 
 function openSequence(view, ctx, sequence) {
   drawer({
@@ -9,13 +27,16 @@ function openSequence(view, ctx, sequence) {
     subtitle: `${sequence.user_id} · ${sequence.event_count} 个事件 · ${sequence.converted ? '已转化' : '未转化'}`,
     body: `${kv([
       ['会话 ID', `<span class="mono">${esc(sequence.session_id)}</span>`],
-      ['用户', `<span class="mono">${esc(sequence.user_id)}</span>`],
+      ['记录账号', `<span class="mono">${esc(sequence.user_id)}</span>`],
       ['事件数', esc(sequence.event_count)],
       ['开始时间', fmtTime(sequence.started_at)],
       ['转化', sequence.converted ? '<span class="badge ok">已转化</span>' : '<span class="badge">未转化</span>'],
       ['模块路径', `<span class="mono">${esc(sequence.modules_path || '—')}</span>`],
     ])}
-    <h3 style="font-size:0.95rem;margin:6px 0 2px">事件时序</h3>
+    <h3 style="font-size:0.95rem;margin:6px 0 2px">身份片段（按切换拆开）</h3>
+    ${fragmentTrack(sequence.fragments)}
+    ${fragmentDetail(sequence.fragments)}
+    <h3 style="font-size:0.95rem;margin:6px 0 2px">原始事件时序</h3>
     ${track(sequence.events_detail, 60)}
     <h3 style="font-size:0.95rem;margin:6px 0 2px">原始事件码</h3>
     <pre class="code">${esc(JSON.stringify(sequence.events, null, 2))}</pre>`,
@@ -40,11 +61,11 @@ export const sequencesPage = {
       <section class="panel">
         <div class="panel-head">
           <h2>序列浏览</h2>
-          <span class="meta">${data.total} 条会话 · 均值 ${esc(stats.avg_events)} 事件 · 转化 ${esc(stats.converted_total)} 条（${esc(stats.conversion_pct)}%）</span>
+          <span class="meta">${data.total} 条会话 · 均值 ${esc(stats.avg_events)} 事件 · 转化 ${esc(stats.converted_total)} 条（${esc(stats.conversion_pct)}%） · 待处理 ${esc(stats.pending_fragments)} 段</span>
         </div>
         <div class="panel-body">
           <div class="filter-bar" id="sequence-filters">
-            ${field({ label: '搜索', name: 'q', value: state.q, placeholder: '会话 ID / 用户 ID' })}
+            ${field({ label: '搜索', name: 'q', value: state.q, placeholder: '会话 ID / 记录账号' })}
             ${field({ label: '是否转化', name: 'converted', value: state.converted, options: [{ value: '', label: '全部' }, { value: 'true', label: '已转化' }, { value: 'false', label: '未转化' }] })}
             ${field({ label: '最少事件数', name: 'min_len', type: 'number', value: state.minLen, placeholder: '8' })}
             <div class="spacer"></div>
@@ -54,8 +75,8 @@ export const sequencesPage = {
           rows: data.items,
           empty: { title: '没有匹配会话', hint: '放宽筛选条件，或先跑一次 seed 导入埋点数据。' },
           columns: [
-            { key: 'session_id', label: '会话', className: 'mono' },
-            { key: 'user_id', label: '用户', className: 'mono' },
+            { key: 'session_id', label: '会话', className: 'mono', render: (row) => `<span class="mono">${esc(row.session_id)}</span>${row.fragments > 1 ? ` <span class="badge ${row.pending ? 'pending' : 'ok'}">${esc(row.fragments)} 段</span>` : ''}` },
+            { key: 'user_id', label: '记录账号', className: 'mono' },
             { key: 'events_detail', label: '事件轨道', render: (row) => track(row.events_detail, 7) },
             { key: 'event_count', label: '事件数', className: 'num' },
             { key: 'converted', label: '转化', render: (row) => (row.converted ? '<span class="badge ok">已转化</span>' : '<span class="badge">—</span>') },

@@ -10,6 +10,7 @@ from src.models.user import User  # noqa: E402
 from src.models.audit import AuditLog  # noqa: E402
 from src.models.event_def import EventDef  # noqa: E402
 from src.models.event_seq import EventSeq  # noqa: E402
+from src.models.fragment import SessionFragment  # noqa: E402
 from src.models.mine_run import MineRun  # noqa: E402
 from src.models.pattern import Pattern  # noqa: E402
 from src.models.recommendation import Recommendation  # noqa: E402
@@ -20,6 +21,7 @@ __all__ = [
     "AuditLog",
     "EventDef",
     "EventSeq",
+    "SessionFragment",
     "MineRun",
     "Pattern",
     "Recommendation",

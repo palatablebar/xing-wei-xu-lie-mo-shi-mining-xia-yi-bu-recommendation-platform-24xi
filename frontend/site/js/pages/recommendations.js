@@ -1,8 +1,74 @@
 import { api } from '../api.js';
 import { ENUMS, badgeTone, can, reviewTone } from '../config.js';
-import { drawer, errorBox, errorMessage, esc, field, fmtPct, fmtTime, kv, table, toast, track } from '../ui.js';
+import {
+  diffTable,
+  drawer,
+  errorBox,
+  errorMessage,
+  esc,
+  field,
+  fmtPct,
+  fmtTime,
+  kv,
+  pendingList,
+  table,
+  toast,
+  track,
+} from '../ui.js';
 
 const state = { runId: '', status: 'pending', priority: '', module: '', q: '' };
+
+function runRecoveryNotice(context) {
+  const run = context || {};
+  if (run.failed_run) {
+    const recovered = run.recovered_run || {};
+    const restored = run.restored || {};
+    return `<div class="notice warn" data-testid="recovery-notice">
+      <span class="badge high">已回滚</span>
+      <span>最近一次重建失败（${esc(run.failed_run.run_no)}：${esc(run.failed_run.error || '未知错误')}），
+        已恢复旧版推荐名单 ${esc(restored.restored ?? 0)} 条
+        （原运行 ${esc(recovered.run_no || run.recovered_from_run || '—')}，覆盖 ${esc(recovered.coverage_pct ?? 0)}%）。
+        会话与待处理片段均未丢失。</span>
+    </div>`;
+  }
+  return '';
+}
+
+function pendingPanel(context) {
+  const pending = (context || {}).pending || {};
+  const samples = (context || {}).pending_samples || [];
+  const reasons = (pending.by_reason || [])
+    .map((item) => `<div class="diff-row"><span>${esc(item.label)}</span><span class="mono">${esc(item.count)} 段</span><span class="badge pending">排除</span></div>`)
+    .join('');
+  return `<section class="panel" data-testid="pending-panel">
+    <div class="panel-head">
+      <h2>待处理片段</h2>
+      <span class="meta">hold · 不参与推荐</span>
+    </div>
+    <div class="panel-body">
+      <div class="notice warn"><span class="badge pending">${esc(pending.pending_fragments ?? 0)} 段</span>
+        <span>${esc(pending.pending_events ?? 0)} 个事件 / ${esc(pending.pending_sessions ?? 0)} 条会话无法唯一归属，
+        已排除在模式与推荐之外；记录保留，等待人工确认身份。</span></div>
+      ${reasons ? `<div class="diff-table" style="margin-top:10px">${reasons}</div>` : ''}
+      ${samples.length ? `<h3 style="font-size:0.95rem;margin:12px 0 2px">待处理明细（前 20）</h3>${pendingList(samples)}` : ''}
+    </div>
+  </section>`;
+}
+
+function diffPanel(context) {
+  const diff = (context || {}).diff;
+  const built = (context || {}).built;
+  return `<section class="panel" data-testid="diff-panel">
+    <div class="panel-head">
+      <h2>重建前后差异</h2>
+      <span class="meta">${esc((context || {}).run_no || '—')}</span>
+    </div>
+    <div class="panel-body">
+      ${diffTable(diff)}
+      ${built ? `<div class="legend" style="margin-top:10px"><span>本次重建：新建 ${esc(built.created)} · 复用 ${esc(built.updated)} 段</span></div>` : ''}
+    </div>
+  </section>`;
+}
 
 function openRecommendation(view, ctx, item) {
   const canReview = can(ctx.user.role, 'recommendation:review');
@@ -10,7 +76,7 @@ function openRecommendation(view, ctx, item) {
     title: `推荐下一步：${item.next_label}`,
     subtitle: `${item.user_id} · ${item.next_module_label} 模块 · 分数 ${item.score.toFixed(3)}`,
     body: `${kv([
-      ['用户', `<span class="mono">${esc(item.user_id)}</span>`],
+      ['归属身份', `<span class="mono">${esc(item.user_id)}</span>`],
       ['最近后缀', `<span class="mono">${esc(item.suffix.join(' › ') || '—')}</span>`],
       ['推荐事件', `<span class="mono hl">${esc(item.next_event)}</span>`],
       ['下一步名称', esc(item.next_label)],
@@ -24,7 +90,7 @@ function openRecommendation(view, ctx, item) {
       ['复核备注', esc(item.review_note || '—')],
       ['生成时间', fmtTime(item.created_at)],
     ])}
-    <h3 style="font-size:0.95rem;margin:6px 0 2px">用户最近事件</h3>
+    <h3 style="font-size:0.95rem;margin:6px 0 2px">身份最近事件</h3>
     ${track(item.suffix_detail, 10)}`,
     footer: canReview
       ? `<form id="review-form" style="display:grid;gap:10px">
@@ -56,9 +122,14 @@ export const recommendationsPage = {
     state.runId = ctx.query.run_id || state.runId;
     let data;
     let runs;
+    let context;
     try {
       runs = await api.get('/api/mine-runs', { limit: 10 });
-      if (!state.runId && runs.items.length) state.runId = String(runs.items[0].id);
+      context = await api.get('/api/recommendations/context', {});
+      if (!state.runId) {
+        if (context.serving_run_id) state.runId = String(context.serving_run_id);
+        else if (runs.items.length) state.runId = String(runs.items[0].id);
+      }
       data = await api.get('/api/recommendations', {
         run_id: state.runId,
         status: state.status,
@@ -67,24 +138,31 @@ export const recommendationsPage = {
         q: state.q,
         limit: 60,
       });
+      context = await api.get('/api/recommendations/context', { run_id: state.runId });
     } catch (err) {
       view.innerHTML = errorBox(errorMessage(err));
       view.querySelector('#retry-btn')?.addEventListener('click', () => recommendationsPage.render(view, ctx));
       return;
     }
     const activeRun = runs.items.find((item) => String(item.id) === String(state.runId)) || runs.items[0];
+    const servingNote = (context || {}).failed_run
+      ? `<span class="meta">正在供数：${esc(((context || {}).recovered_run || {}).run_no || '旧版')}</span>`
+      : '';
+    const pendingInfo = (context || {}).pending || {};
     view.innerHTML = `
+      ${runRecoveryNotice(context)}
       <section class="panel">
         <div class="panel-head">
           <h2>下一步推荐名单</h2>
           <div style="display:flex;gap:8px;align-items:center">
-            <span class="meta">${data.total} 条 · 覆盖率 ${fmtPct(activeRun ? activeRun.coverage_pct : 0)}</span>
+            <span class="meta">${data.total} 条 · 覆盖率 ${fmtPct(activeRun ? activeRun.coverage_pct : 0)} · 待处理 ${esc(pendingInfo.pending_fragments ?? 0)} 段</span>${servingNote}
+            ${can(ctx.user.role, 'export:read') ? '<button class="btn sm ghost" id="export-fragments">导出待处理片段</button>' : ''}
             ${can(ctx.user.role, 'export:read') ? '<button class="btn sm ghost" id="export-recs">导出 CSV</button>' : ''}
           </div>
         </div>
         <div class="panel-body">
           <div class="filter-bar" id="rec-filters">
-            ${field({ label: '搜索', name: 'q', value: state.q, placeholder: '用户 ID / 事件码' })}
+            ${field({ label: '搜索', name: 'q', value: state.q, placeholder: '身份 ID / 事件码' })}
             ${field({ label: '挖掘运行', name: 'run_id', value: state.runId, options: [{ value: '', label: '全部运行' }, ...runs.items.map((run) => ({ value: run.id, label: run.run_no }))] })}
             ${field({ label: '复核状态', name: 'status', value: state.status, options: [{ value: '', label: '全部' }, ...Object.entries(ENUMS.reviewStatus).map(([value, label]) => ({ value, label }))] })}
             ${field({ label: '优先级', name: 'priority', value: state.priority, options: [{ value: '', label: '全部' }, ...Object.entries(ENUMS.priority).map(([value, label]) => ({ value, label }))] })}
@@ -96,7 +174,7 @@ export const recommendationsPage = {
           rows: data.items,
           empty: { title: '该筛选下没有推荐', hint: '换一个运行或把复核状态改成「全部」。' },
           columns: [
-            { key: 'user_id', label: '用户', className: 'mono' },
+            { key: 'user_id', label: '归属身份', className: 'mono' },
             { key: 'suffix', label: '最近后缀', render: (row) => `<span class="mono muted">${esc(row.suffix.join(' › ') || '—')}</span>` },
             { key: 'next_label', label: '推荐下一步', render: (row) => `<b>${esc(row.next_label)}</b><div class="mono muted">${esc(row.next_event)}</div>` },
             { key: 'next_module_label', label: '模块' },
@@ -107,7 +185,11 @@ export const recommendationsPage = {
             { key: 'status', label: '复核', render: (row) => `<span class="badge ${reviewTone(row.status)}">${esc(ENUMS.reviewStatus[row.status] || row.status)}</span>` },
           ],
         })}
-      </section>`;
+      </section>
+      <div class="grid-2" style="margin-top:16px">
+        ${pendingPanel(context)}
+        ${diffPanel(context)}
+      </div>`;
     const filters = view.querySelector('#rec-filters');
     filters?.addEventListener('change', () => {
       state.q = filters.querySelector('[name=q]').value.trim();
@@ -133,6 +215,14 @@ export const recommendationsPage = {
       try {
         await api.download(`/api/exports/recommendations.csv${state.runId ? `?run_id=${state.runId}` : ''}`, 'recommendations.csv');
         toast('已开始下载推荐名单');
+      } catch (err) {
+        toast(errorMessage(err), 'err');
+      }
+    });
+    view.querySelector('#export-fragments')?.addEventListener('click', async () => {
+      try {
+        await api.download('/api/exports/fragments.csv?status=pending', 'identity-fragments.csv');
+        toast('已开始下载待处理片段');
       } catch (err) {
         toast(errorMessage(err), 'err');
       }

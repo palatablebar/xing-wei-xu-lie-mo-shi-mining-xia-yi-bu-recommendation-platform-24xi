@@ -1,4 +1,8 @@
-"""推荐服务：名单、详情、复核、用户脱敏（viewer 只看脱敏 ID）。"""
+"""推荐服务：名单、详情、复核、用户脱敏（viewer 只看脱敏 ID）。
+
+推荐只由「可归属片段」产生；本服务同时返回待处理片段与重建前后差异，
+供推荐台展示「哪些片段被排除、为什么、重建前后名单差多少」。
+"""
 from __future__ import annotations
 
 from sqlalchemy import func, select
@@ -9,6 +13,7 @@ from src.models.event_def import EventDef
 from src.models.mine_run import MineRun
 from src.models.pattern import Pattern
 from src.models.recommendation import Recommendation
+from src.services import fragment_service
 from src.services.sequence_service import mask_user
 from src.utils.errors import not_found
 from src.utils.timeutil import iso_utc, utcnow
@@ -93,6 +98,47 @@ def list_recommendations(
         "total": total,
         "limit": limit,
         "offset": offset,
+    }
+
+
+def context(db: Session, run_id: int | None, *, masked: bool = False) -> dict:
+    """推荐台的上下文：待处理片段（排除原因）+ 该运行的重建前后差异。
+
+    未指定运行时优先取「正在供数的运行」，失败运行不会顶替旧版名单。
+    """
+    from src.services import mining_service
+
+    if run_id:
+        run = db.get(MineRun, run_id)
+    else:
+        run = mining_service.serving_run(db)
+    metrics = (run.metrics or {}) if run else {}
+    pending = fragment_service.pending_fragments(db, masked=masked, limit=20)
+    previous_id = (metrics.get("before") or {}).get("previous_run_id")
+    # 失败运行时，真正在供数的是上一次可用运行；从库里补全它的信息供页面提示
+    serving = mining_service.serving_run(db)
+    recovered = (
+        {"run_no": serving.run_no, "rec_count": serving.rec_count, "coverage_pct": serving.coverage_pct}
+        if serving and run and run.status == "failed"
+        else None
+    )
+    return {
+        "run_id": run.id if run else None,
+        "run_no": run.run_no if run else None,
+        "run_status": run.status if run else None,
+        "serving_run_id": serving.id if serving else None,
+        "pending": pending["summary"],
+        "pending_samples": pending["items"],
+        "diff": metrics.get("diff"),
+        "built": metrics.get("built"),
+        "restored": metrics.get("restored"),
+        "failed_run": (
+            {"run_no": run.run_no, "status": run.status, "error": metrics.get("error")}
+            if run and run.status == "failed"
+            else None
+        ),
+        "recovered_from_run": previous_id,
+        "recovered_run": recovered,
     }
 
 

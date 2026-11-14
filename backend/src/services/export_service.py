@@ -24,6 +24,7 @@ def recommendations_csv(db: Session, run_id: int | None = None) -> bytes:
     labels = _labels(db)
     headers = [
         "用户ID",
+        "归属身份",
         "最近事件后缀",
         "推荐下一步",
         "下一步名称",
@@ -40,6 +41,7 @@ def recommendations_csv(db: Session, run_id: int | None = None) -> bytes:
     rows = [
         [
             item.user_id,
+            item.user_id,
             " > ".join(item.suffix or []),
             item.next_event,
             labels.get(item.next_event, item.next_event),
@@ -52,6 +54,50 @@ def recommendations_csv(db: Session, run_id: int | None = None) -> bytes:
             item.reviewer or "",
             item.review_note or "",
             item.created_at.strftime("%Y-%m-%d %H:%M") if item.created_at else "",
+        ]
+        for item in rows_db
+    ]
+    return to_csv(headers, rows)
+
+
+def fragments_csv(db: Session, *, status: str | None = None) -> bytes:
+    """身份片段导出：可归属/待处理都导出，待处理的排除原因单独一列。"""
+    from src.models.fragment import SessionFragment
+    from src.constants.enums import FRAGMENT_STATUS_LABELS, RESOLUTION_LABELS
+
+    stmt = select(SessionFragment)
+    if status:
+        stmt = stmt.where(SessionFragment.status == status)
+    rows_db = db.scalars(stmt.order_by(SessionFragment.session_id, SessionFragment.fragment_no)).all()
+    labels = _labels(db)
+    headers = [
+        "会话ID",
+        "片段号",
+        "起始下标",
+        "结束下标",
+        "事件数",
+        "归属身份",
+        "会话记录账号",
+        "状态",
+        "判定方式",
+        "排除原因",
+        "候选账号",
+        "事件序列",
+    ]
+    rows = [
+        [
+            item.session_id,
+            item.fragment_no,
+            item.start_index,
+            item.end_index,
+            item.event_count,
+            item.actor or "",
+            item.session_owner,
+            FRAGMENT_STATUS_LABELS.get(item.status, item.status),
+            RESOLUTION_LABELS.get(item.resolution, item.resolution),
+            item.reason or "",
+            "/".join(item.candidates or []),
+            " > ".join(labels.get(code, code) for code in (item.events or [])),
         ]
         for item in rows_db
     ]
